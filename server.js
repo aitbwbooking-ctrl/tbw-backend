@@ -1,16 +1,85 @@
-import express from "express";import cors from "cors";import helmet from "helmet";import compression from "compression";import rateLimit from "express-rate-limit";import fetch from "node-fetch";import dotenv from "dotenv";dotenv.config();
-const app=express();const PORT=process.env.PORT||4000;
-app.use(helmet({crossOriginEmbedderPolicy:false,contentSecurityPolicy:false}));
-app.use(cors());app.use(compression());app.use(express.json());
-const limiter=rateLimit({windowMs:60e3,max:200});app.use("/api/",limiter);
-app.get("/api/health",(_req,res)=>res.json({ok:true,ts:Date.now()}));
-app.get("/api/gmaps-key",(req,res)=>res.json({key:process.env.GOOGLE_MAPS_API_KEY||""}));
-async function geocodeCityOWM(city){const key=process.env.OPENWEATHER_API_KEY;const url=`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(city)}&limit=1&appid=${key}`;const r=await fetch(url);const j=await r.json();if(!Array.isArray(j)||!j.length)throw new Error("Grad nije pronađen");return{lat:j[0].lat,lon:j[0].lon}}
-app.get("/api/weather",async(req,res)=>{try{const city=req.query.city;if(!city)return res.status(400).json({error:"city param"});const{lat,lon}=await geocodeCityOWM(city);const key=process.env.OPENWEATHER_API_KEY;const url=`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&units=metric&lang=hr&appid=${key}`;const r=await fetch(url);if(!r.ok)throw new Error("OpenWeather error");const data=await r.json();res.json({city,lat,lon,data})}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/photos",async(req,res)=>{try{const q=req.query.q||"city";const key=process.env.UNSPLASH_ACCESS_KEY;const url=`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&orientation=landscape&per_page=6&client_id=${key}`;const r=await fetch(url);if(!r.ok)throw new Error("Unsplash error");const j=await r.json();const images=(j.results||[]).map(p=>({url:p.urls?.regular,thumb:p.urls?.thumb,author:p.user?.name}));res.json({query:q,images})}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/poi",async(req,res)=>{try{const city=req.query.city;if(!city)return res.status(400).json({error:"city param"});const{lat,lon}=await geocodeCityOWM(city);const key=process.env.OPENTRIPMAP_API_KEY;const url=`https://api.opentripmap.com/0.1/en/places/radius?radius=5000&lon=${lon}&lat=${lat}&limit=20&rate=3&apikey=${key}`;const r=await fetch(url);if(!r.ok)throw new Error("OpenTripMap error");const j=await r.json();res.json({city,lat,lon,poi:j.features||[]})}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/traffic",async(req,res)=>{try{const city=req.query.city;if(!city)return res.status(400).json({error:"city param"});const{lat,lon}=await geocodeCityOWM(city);const key=process.env.TOMTOM_API_KEY;const d=0.08;const bbox=`${lon-d},${lat-d},${lon+d},${lat+d}`;const fields="{incidents{type,geometry{type,coordinates},properties{iconCategory,magnitudeOfDelay,from,to,description}}}";const url=`https://api.tomtom.com/traffic/services/5/incidentDetails?bbox=${bbox}&fields=${encodeURIComponent(fields)}&key=${key}`;const r=await fetch(url);if(!r.ok)throw new Error("TomTom error");const j=await r.json();res.json({city,lat,lon,incidents:j?.incidents||[]})}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/alerts",async(req,res)=>{try{const city=req.query.city||"Hrvatska";const[wR,tR]=await Promise.all([fetch(`${req.protocol}://${req.get("host")}/api/weather?city=${encodeURIComponent(city)}`),fetch(`${req.protocol}://${req.get("host")}/api/traffic?city=${encodeURIComponent(city)}`)]);let items=[];if(wR.ok){const w=await wR.json();(w?.data?.alerts||[]).forEach(a=>items.push(`⚠️ ${a.event} • ${a.sender_name}`))}if(tR.ok){const t=await tR.json();(t?.incidents||[]).slice(0,5).forEach(i=>{if(i.properties?.description)items.push('🚧 '+i.properties.description)})}res.json({items,updated:Date.now()})}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/places-nearby",async(req,res)=>{try{const lat=parseFloat(req.query.lat),lon=parseFloat(req.query.lon);if(!lat||!lon)return res.status(400).json({error:"lat/lon params"});const key=process.env.GOOGLE_MAPS_API_KEY;const types=(req.query.types||"supermarket,pharmacy,hospital").split(",");const radius=parseInt(req.query.radius||"3000",10);const calls=types.map(t=>fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lon}&radius=${radius}&type=${encodeURIComponent(t)}&key=${key}`).then(r=>r.json()));const arr=(await Promise.all(calls)).flatMap(j=>j.results||[]).slice(0,20).map(p=>({name:p.name,rating:p.rating,user_ratings_total:p.user_ratings_total,open_now:p.opening_hours?.open_now,photoRef:p.photos?.[0]?.photo_reference}));res.json({places:arr})}catch(e){res.status(500).json({error:e.message})}});
-app.post("/api/ai/interpret",async(req,res)=>{try{let body='';for await (const c of req) body+=c;const {text,lang='hr-HR'}=JSON.parse(body||'{}');const reply=(text||'').toLowerCase().includes('vodi me do')?{intent:'route',destination:text.replace(/.*vodi me do/i,'').trim(),reply:'Pokrećem navigaciju.'}:{intent:'search',reply:'Prikazujem rezultate.'};res.json(reply)}catch(e){res.status(500).json({error:e.message})}});
-app.listen(PORT,()=>console.log(`TBW backend running on :${PORT}`));
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
+
+const app = express();
+const PORT = process.env.PORT || 4000;
+
+app.use(cors());
+app.use(helmet());
+app.use(compression());
+app.use(express.json());
+
+// Rate limiter
+const limiter = rateLimit({ windowMs: 60 * 1000, max: 100 });
+app.use(limiter);
+
+// Root check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "TBW backend active ✅" });
+});
+
+// Google Maps key
+app.get("/api/gmaps-key", (req, res) => {
+  res.json({ key: process.env.GOOGLE_MAPS_API_KEY || "missing" });
+});
+
+// Weather
+app.get("/api/weather", async (req, res) => {
+  try {
+    const city = req.query.city;
+    if (!city) return res.status(400).json({ error: "city param required" });
+
+    const key = process.env.OPENWEATHER_API_KEY;
+    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&units=metric&appid=${key}`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Points of interest (POI)
+app.get("/api/poi", async (req, res) => {
+  try {
+    const city = req.query.city;
+    if (!city) return res.status(400).json({ error: "city param required" });
+
+    const url = `https://api.opentripmap.com/0.1/en/places/geoname?name=${encodeURIComponent(city)}&apikey=${process.env.OPENTRIPMAP_API_KEY}`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Photos
+app.get("/api/photos", async (req, res) => {
+  try {
+    const query = req.query.q;
+    if (!query) return res.status(400).json({ error: "q param required" });
+
+    const key = process.env.UNSPLASH_ACCESS_KEY;
+    const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&client_id=${key}`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Traffic (mock)
+app.get("/api/traffic", (req, res) => {
+  res.json({ city: req.query.city, status: "Smooth traffic 🚗" });
+});
+
+// Start server
+app.listen(PORT, () => console.log(`TBW backend running on port ${PORT}`));
