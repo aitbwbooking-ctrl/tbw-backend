@@ -8,38 +8,25 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ✅ DOZVOLI SAMO TVOJ FRONTEND
-app.use(cors({
-  origin: "https://tbw-frontend.onrender.com",
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
-
+app.use(cors());
 app.use(helmet());
 app.use(compression());
 app.use(express.json());
 
-const limiter = rateLimit({ windowMs: 60_000, max: 120 });
+const limiter = rateLimit({ windowMs: 60_000, max: 180 });
 app.use(limiter);
 
-// KEYS
+// Keys (Render env)
 const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 const OPENTRIPMAP_API_KEY = process.env.OPENTRIPMAP_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "change-me";
 
-// HEALTH
-app.get("/api/health", (_req,res)=>res.json({ok:true,time:new Date()}));
+// Health
+app.get("/api/health", (_req,res)=>res.json({ok:true,time:new Date().toISOString()}));
 
-// ✅ CHAT endpoint
-app.post("/api/chat", async (req, res) => {
-  const message = req.body.message || "";
-  if (!message) return res.json({ reply: "Molim unesite pitanje 😊" });
-
-  return res.json({ reply: `Pitao si: "${message}". Backend je aktivan ✅` });
-});
-
-// WEATHER
+// Weather
 app.get("/api/weather", async (req,res)=>{
   try{
     const city = req.query.city;
@@ -50,7 +37,7 @@ app.get("/api/weather", async (req,res)=>{
   }catch(e){ res.status(500).json({error:"weather_failed"}); }
 });
 
-// PHOTOS
+// Photos
 app.get("/api/photos", async (req,res)=>{
   try{
     const q = req.query.q || "Croatia";
@@ -88,23 +75,58 @@ app.get("/api/poi", async (req,res)=>{
   }catch(e){ res.status(500).json({error:"poi_failed"}); }
 });
 
-// ALERTS
+// ==== ALERTS PRO ====
+// In-memory admin alerts (persist kroz redeploy nije garantirano; za demo OK)
+let adminAlerts = [];
+
+// Public aggregator (demo – uvijek vraća nešto + admin dodatke)
 app.get("/api/alerts", async (req,res)=>{
   const city = req.query.city || "Hrvatska";
-  res.json({
-    alerts:[
-      {type:"weather", message:`Nema posebnih vremenskih upozorenja za ${city}.`},
-      {type:"traffic", message:`Promet u ${city} je uglavnom uredan.`},
-      {type:"hazard",  message:`Obavijest: provjerite lokalne kamere i ograničenja brzine.`}
-    ],
-    updated: Date.now()
-  });
+  const base = [
+    {type:"traffic", message:`Promet u ${city} je uglavnom uredan.`, severity:"low"},
+    {type:"weather", message:`Nema posebnih vremenskih upozorenja za ${city}.`, severity:"low"}
+  ];
+
+  // TODO: Ovdje možeš dodati realne feedove (HAK/DHMZ/Meteoalarm) i pushati u array "base"
+  // Npr. try { const feed = await fetch(...).then(r=>r.json()); base.push(...mapFeed(feed)); } catch{}
+
+  // Daj admin alerts prioritet (prvi u listi -> popup + sirena)
+  const alerts = [...adminAlerts, ...base].slice(0,10);
+  res.json({ alerts, updated: Date.now() });
 });
 
-// TRAFFIC
-app.get("/api/traffic", async (_req,res)=>{
-  res.json({status:"free flow", last_update: new Date()});
+// Admin: dodaj alert (Authorization: Bearer <ADMIN_TOKEN>)
+app.post("/api/alerts/push", (req,res)=>{
+  try{
+    const auth = req.headers.authorization || "";
+    if (auth !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({error:"unauthorized"});
+
+    const { type="hazard", message="", severity="medium" } = req.body || {};
+    if (!message) return res.status(400).json({error:"message required"});
+
+    adminAlerts.unshift({ type, message, severity });
+    // limit
+    adminAlerts = adminAlerts.slice(0,20);
+    res.json({ ok:true, count: adminAlerts.length });
+  }catch(e){ res.status(500).json({error:"push_failed"}); }
 });
 
-// START
-app.listen(PORT, ()=> console.log(`✅ TBW backend running on :${PORT}`));
+// Simple traffic (placeholder)
+app.get("/api/traffic", (_req,res)=> res.json({status:"free flow", last_update:new Date()}));
+
+// AI chat (opcionalno, ako koristiš)
+app.post("/api/chat", async (req,res)=>{
+  try{
+    const msg = (req.body?.message||"").slice(0,400);
+    const prompt = `Odgovori kratko i korisno na hrvatskom:\n\n${msg}`;
+    const r = await fetch("https://api.openai.com/v1/chat/completions",{
+      method:"POST",
+      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${OPENAI_API_KEY}`},
+      body: JSON.stringify({ model:"gpt-4o-mini", messages:[{role:"user", content: prompt}], temperature:0.4 })
+    });
+    const d = await r.json();
+    res.json({ reply: d?.choices?.[0]?.message?.content?.trim() || "OK." });
+  }catch(e){ res.json({ reply:"(AI trenutno nedostupan.)" }); }
+});
+
+app.listen(PORT, ()=> console.log(`✅ TBW backend on :${PORT}`));
