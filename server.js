@@ -8,215 +8,124 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(helmet());
 app.use(compression());
 app.use(express.json());
+app.use(rateLimit({ windowMs: 60_000, max: 180 }));
 
-const limiter = rateLimit({ windowMs: 60_000, max: 160 });
-app.use(limiter);
+// ------------ helperi ------------
+async function geocodeCity(city){
+  const u = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(city)}`;
+  const r = await fetch(u, { headers:{ "User-Agent":"tbw-ai-premium/1.0" }});
+  const j = await r.json();
+  if(!j?.length) return null;
+  return { lat:+j[0].lat, lon:+j[0].lon, name:j[0].display_name };
+}
 
-// KEYS (Render -> Environment)
-const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
-const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-const OPENTRIPMAP_API_KEY = process.env.OPENTRIPMAP_API_KEY;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+// ------------ health ------------
+app.get("/api/health", (_req,res)=> res.json({ ok:true, time:Date.now() }));
 
-// HEALTH
-app.get("/api/health", (_req, res) => res.json({ ok: true, time: new Date() }));
-
-// WEATHER (OpenWeather current)
-app.get("/api/weather", async (req, res) => {
-  try {
-    const city = req.query.city;
-    if (!city) return res.status(400).json({ error: "city param required" });
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
-      city
-    )}&appid=${OPENWEATHER_API_KEY}&units=metric&lang=hr`;
-    const d = await (await fetch(url)).json();
-    res.json(d);
-  } catch {
-    res.status(500).json({ error: "weather_failed" });
-  }
-});
-
-// PHOTOS (Unsplash)
-app.get("/api/photos", async (req, res) => {
-  try {
-    const q = req.query.q || "Croatia";
-    const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(
-      q
-    )}&per_page=8&client_id=${UNSPLASH_ACCESS_KEY}`;
-    const d = await (await fetch(url)).json();
-    res.json(d);
-  } catch {
-    res.status(500).json({ error: "photos_failed" });
-  }
-});
-
-// POI (OpenTripMap)
-app.get("/api/poi", async (req, res) => {
-  try {
-    const city = req.query.city;
-    if (!city) return res.status(400).json({ error: "city param required" });
-    const geoU = `https://api.opentripmap.com/0.1/en/places/geoname?name=${encodeURIComponent(
-      city
-    )}&apikey=${OPENTRIPMAP_API_KEY}`;
-    const g = await (await fetch(geoU)).json();
-    if (!g.lat || !g.lon) return res.json({ items: [] });
-
-    const listU = `https://api.opentripmap.com/0.1/en/places/radius?radius=5000&lon=${g.lon}&lat=${g.lat}&rate=2&limit=10&format=json&apikey=${OPENTRIPMAP_API_KEY}`;
-    const L = await (await fetch(listU)).json();
-    const out = [];
-    for (const p of L) {
-      try {
-        const infoU = `https://api.opentripmap.com/0.1/en/places/xid/${p.xid}?apikey=${OPENTRIPMAP_API_KEY}`;
-        const I = await (await fetch(infoU)).json();
-        out.push({
-          name: I.name || p.name || "Znamenitost",
-          kind: I.kinds || "",
-          short:
-            I.wikipedia_extracts?.text?.split(". ").slice(0, 2).join(". ") ||
-            I.info?.descr ||
-            "",
-          lon: I.point?.lon,
-          lat: I.point?.lat,
-        });
-      } catch {}
-    }
-    res.json({ items: out });
-  } catch {
-    res.status(500).json({ error: "poi_failed" });
-  }
-});
-
-// SEA STATE (aproksimacija iz zraka + opis)
-app.get("/api/sea", async (req, res) => {
-  try {
-    const city = req.query.city || "Split";
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
-      city
-    )}&appid=${OPENWEATHER_API_KEY}&units=metric`;
-    const d = await (await fetch(url)).json();
-    const t = Math.round(d?.main?.temp ?? 18);
-    const seaTemp = Math.max(12, Math.min(28, Math.round(t - 2))); // gruba aproksimacija
-    res.json({
-      city,
-      seaTemp,
-      wave: "0.3 m (mirno)",
-      uv: "UMJERENO",
-      text: `More mirno, vidljivost dobra. Temp. mora oko ${seaTemp}°C.`,
-    });
-  } catch {
-    res.status(500).json({ error: "sea_failed" });
-  }
-});
-
-// ALERTS (demo ticker + grad)
-app.get("/api/alerts", async (req, res) => {
+// ------------ ticker / alerts ------------
+app.get("/api/alerts", async (req,res)=>{
   const city = req.query.city || "Hrvatska";
-  res.json({
-    alerts: [
-      { type: "traffic", message: `Promet u ${city} uglavnom uredan.` },
-      { type: "weather", message: `Nema posebnih vremenskih upozorenja za ${city}.` },
-      { type: "hazard", message: `Obavijest: provjerite lokalne kamere i ograničenja brzine.` },
-    ],
-    updated: Date.now(),
-  });
+  const msgs = [
+    `Promet u ${city} uglavnom uredan.`,
+    `Nema posebnih vremenskih upozorenja za ${city}.`,
+    `Savjet: provjerite radove i ograničenja brzine.`,
+    `Napomena: EV punionice vidljive su na karti.`
+  ];
+  res.json({ alerts: msgs.map(text=>({text})), updated: Date.now() });
 });
 
-// TRAFFIC STATUS (REST)
-app.get("/api/traffic", (_req, res) => {
-  res.json({
-    status: "free flow",
-    incidents: [
-      { type: "radar", road: "A1", km: 237, city: "Šibenik" },
-      { type: "work", road: "A3", km: 78, city: "Novska" },
-    ],
-    last_update: new Date(),
-  });
+// ------------ vrijeme + more + zrak ------------
+app.get("/wx", async (req,res)=>{
+  try{
+    const city = req.query.city || "Zagreb";
+    const geo = await geocodeCity(city);
+    if(!geo) return res.json({ city, error:"nogeo" });
+
+    // MET Norway (zrak)
+    const metUrl = `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${geo.lat}&lon=${geo.lon}`;
+    const metR = await fetch(metUrl,{ headers:{ "User-Agent":"tbw-ai-premium/1.0" }});
+    const metJ = await metR.json();
+    const now = metJ?.properties?.timeseries?.[0];
+    const d = now?.data?.instant?.details || {};
+    const temp = Math.round(d.air_temperature ?? 0);
+    const wind = Math.round(d.wind_speed ?? 0);
+    const humid = Math.round(d.relative_humidity ?? 0);
+    const pressure = Math.round(d.air_pressure_at_sea_level ?? 0);
+
+    // Open-Meteo marine (temp mora)
+    const seaU = `https://marine-api.open-meteo.com/v1/marine?latitude=${geo.lat}&longitude=${geo.lon}&hourly=sea_surface_temperature`;
+    const seaR = await fetch(seaU); const seaJ = await seaR.json();
+    const sea = Math.round(seaJ?.hourly?.sea_surface_temperature?.[0] ?? 0);
+
+    res.json({ city, lat:geo.lat, lon:geo.lon, temp, wind, humid, pressure, sea, uv:null });
+  }catch(e){ res.status(500).json({ error:"wx_failed" }); }
 });
 
-// TRAFFIC STREAM (SSE / RDS feed)
-app.get("/api/traffic/stream", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  send({ type: "hello", at: Date.now() });
-
-  const timer = setInterval(() => {
-    const sample = [
-      { type: "radar", msg: "Radar na A1, ograničenje 100 km/h." },
-      { type: "accident", msg: "Manja nesreća, sporije na obilaznici." },
-      { type: "work", msg: "Radovi na cesti, suženje traka." },
-      { type: "info", msg: "Promet uglavnom uredan." },
-    ];
-    send({ type: "rds", event: sample[Math.floor(Math.random() * sample.length)], at: Date.now() });
-  }, 8000);
-
-  req.on("close", () => clearInterval(timer));
+// ------------ fotografije (Wikimedia) ------------
+app.get("/photos", async (req,res)=>{
+  try{
+    const city = req.query.city || "Croatia";
+    const u = `https://commons.wikimedia.org/w/api.php?action=query&origin=*&format=json&prop=pageimages|images&generator=search&gsrsearch=${encodeURIComponent(city)}&gsrlimit=12&pithumbsize=640`;
+    const r = await fetch(u); const j = await r.json();
+    const pages = Object.values(j.query?.pages || {});
+    const photos = pages.map(p=>p.thumbnail?.source).filter(Boolean);
+    res.json({ photos });
+  }catch(e){ res.status(500).json({ error:"photos_failed" }); }
 });
 
-// HOTELS (server-side Google Places Text Search) – CORS safe
-app.get("/api/hotels/search", async (req, res) => {
-  try {
+// ------------ POI (Wikipedia geosearch) ------------
+app.get("/poi", async (req,res)=>{
+  try{
     const city = req.query.city || "Split";
-    const locResp = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
-        city
-      )}&key=${GOOGLE_PLACES_API_KEY}`
-    );
-    const loc = await locResp.json();
-    const pos = loc?.results?.[0]?.geometry?.location;
-    if (!pos) return res.json({ items: [] });
+    const geo = await geocodeCity(city);
+    if(!geo) return res.json({ items:[] });
 
-    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
-      "apartment " + city
-    )}&location=${pos.lat},${pos.lng}&radius=5000&key=${GOOGLE_PLACES_API_KEY}`;
-    const d = await (await fetch(url)).json();
-    const items = (d.results || []).slice(0, 10).map((p) => ({
-      id: p.place_id,
-      name: p.name,
-      address: p.formatted_address,
-      lat: p.geometry?.location?.lat,
-      lng: p.geometry?.location?.lng,
-      price: `${40 + Math.round(Math.random() * 60)} € / noć`,
-      rating: p.rating || 4.3,
+    const u = `https://hr.wikipedia.org/w/api.php?action=query&origin=*&list=geosearch&gscoord=${geo.lat}|${geo.lon}&gsradius=8000&gslimit=12&format=json`;
+    const r = await fetch(u); const j = await r.json();
+    const items = (j.query?.geosearch||[]).map(p=>({
+      name:p.title, dist:p.dist, page:`https://hr.wikipedia.org/?curid=${p.pageid}`, category:"poi"
     }));
     res.json({ items });
-  } catch (e) {
-    res.status(500).json({ error: "hotels_failed" });
-  }
+  }catch(e){ res.status(500).json({ error:"poi_failed" }); }
 });
 
-// AI short description (OpenAI)
-app.get("/api/describe", async (req, res) => {
-  try {
-    const { name, city } = req.query;
-    if (!name) return res.status(400).json({ error: "name required" });
-    const prompt = `U 1–2 rečenice (≤40 riječi) ukratko i zanimljivo opiši turističku znamenitost "${name}" u ${
-      city || "Hrvatskoj"
-    } na hrvatskom jeziku.`;
-
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-      }),
-    });
-    const d = await r.json();
-    const txt = d?.choices?.[0]?.message?.content?.trim() || `O ${name} trenutno nemam detalja.`;
-    res.json({ speech: txt, lang: "hr" });
-  } catch {
-    res.status(500).json({ error: "ai_failed" });
-  }
+// ------------ servisi & hitne ------------
+app.get("/services", async (_req,res)=>{
+  const items = [
+    { name:"Policija 192", type:"emergency", href:"tel:192" },
+    { name:"Hitna 194", type:"emergency", href:"tel:194" },
+    { name:"Vatrogasci 193", type:"emergency", href:"tel:193" },
+    { name:"EU 112", type:"emergency", href:"tel:112" },
+    { name:"EV punionice (PlugShare)", type:"ev", href:"https://www.plugshare.com/" },
+    { name:"Najbliža bolnica (Mape)", type:"health", href:"https://www.google.com/maps/search/hospital/" }
+  ];
+  res.json({ items });
 });
 
-app.listen(PORT, () => console.log(`✅ TBW backend on :${PORT}`));
+// ------------ rezervacije (demo + redirect partneri) ------------
+app.get("/booking/search", async (req,res)=>{
+  const { city="Split" } = req.query;
+  const rnd = (a,b)=>Math.round(a + Math.random()*(b-a));
+  const mk = (i)=>({ id:i, name:`${city} Apartment #${100+i}`, price:rnd(45,180), address:`${city} centar`, rating:(Math.random()*2+3).toFixed(1) });
+  res.json({ results: [mk(1),mk(2),mk(3),mk(4),mk(5),mk(6)] });
+});
+app.post("/booking/reserve", async (req,res)=> res.json({ ok:true, id:req.body?.id||null }));
+
+// ------------ AI heuristika (bez ključeva) ------------
+app.post("/assistant/query", async (req,res)=>{
+  const q = (req.body?.query||"").toLowerCase();
+  if(/(ruta|vozi|put|do|za)/.test(q)){
+    const m = q.match(/(?:do|za)\s+(.+)$/); return res.json({ intent:"route", to:m?m[1]:"" });
+  }
+  if(/(rezerv|apartman|hotel|smješta)/.test(q)){
+    const m = q.match(/(?:u|za)\s+([A-Za-zčćžšđ\s]+)/); return res.json({ intent:"book", city:m?m[1].trim():"" });
+  }
+  res.json({ intent:"none" });
+});
+
+app.listen(PORT, ()=> console.log(`✅ TBW backend listening on :${PORT}`));
