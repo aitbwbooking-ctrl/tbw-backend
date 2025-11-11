@@ -2,167 +2,229 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import morgan from "morgan";
 import rateLimit from "express-rate-limit";
-import fetch from "node-fetch";
+import dotenv from "dotenv";
+import axios from "axios";
 
+dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-app.set("trust proxy", 1);
+// --------- MIDDLEWARE ----------
 app.use(cors());
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(compression());
 app.use(express.json());
-app.use(rateLimit({ windowMs: 60_000, max: 180 }));
+app.use(morgan("tiny"));
+app.use(rateLimit({ windowMs: 60_000, max: 120 }));
 
-const UA = { headers:{ "User-Agent":"tbw-atlas/1.0 (+https://tbw)" }};
+// --------- ENV ----------
+const {
+  PORT = 3001,
+  OPENWEATHER_API_KEY,
+  GOOGLE_PLACES_API_KEY,
+  TOMTOM_API_KEY,
+  OPENAI_API_KEY
+} = process.env;
 
-// -------- helpers
-async function geocodeCity(city){
-  const u = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(city)}`;
-  const j = await (await fetch(u, UA)).json();
-  if(!j?.length) return null;
-  return { lat:+j[0].lat, lon:+j[0].lon, name:j[0].display_name };
+const HAS = {
+  ow: !!OPENWEATHER_API_KEY,
+  gp: !!GOOGLE_PLACES_API_KEY,
+  tt: !!TOMTOM_API_KEY,
+  oa: !!OPENAI_API_KEY
+};
+
+// Util: graceful external fetch
+async function safeGet(url, cfg = {}) {
+  try {
+    const r = await axios.get(url, cfg);
+    return { ok: true, data: r.data };
+  } catch (e) {
+    return { ok: false, error: e?.response?.data || e.message };
+  }
 }
 
-// -------- health
-app.get("/api/health", (_req,res)=> res.json({ ok:true, time:Date.now() }));
-
-// -------- alerts ticker
-app.get("/api/alerts", async (req,res)=>{
-  const city = req.query.city || "Hrvatska";
+// --------- HEALTH ----------
+app.get("/api/health", (req, res) => {
   res.json({
-    alerts:[
-      {text:`Promet u ${city} uglavnom uredan.`},
-      {text:`Nema posebnih vremenskih upozorenja za ${city}.`},
-      {text:`Savjet: provjerite radove i ograničenja brzine.`}
-    ],
-    updated: Date.now()
+    ok: true,
+    service: "TBW AI PREMIUM BACKEND",
+    has: HAS,
+    time: new Date().toISOString()
   });
 });
 
-// -------- weather + sea + air
-app.get("/wx", async (req,res)=>{
-  try{
-    const city = req.query.city || "Zagreb";
-    const geo = await geocodeCity(city);
-    if(!geo) return res.json({ city, error:"nogeo" });
-
-    const met = await (await fetch(
-      `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${geo.lat}&lon=${geo.lon}`, UA
-    )).json();
-    const now = met?.properties?.timeseries?.[0];
-    const d = now?.data?.instant?.details || {};
-    const temp = Math.round(d.air_temperature ?? 0);
-    const wind = Math.round(d.wind_speed ?? 0);
-    const humid = Math.round(d.relative_humidity ?? 0);
-    const pressure = Math.round(d.air_pressure_at_sea_level ?? 0);
-
-    const seaJ = await (await fetch(
-      `https://marine-api.open-meteo.com/v1/marine?latitude=${geo.lat}&longitude=${geo.lon}&hourly=sea_surface_temperature`
-    )).json();
-    const sea = Math.round(seaJ?.hourly?.sea_surface_temperature?.[0] ?? 0);
-
-    res.json({ city, lat:geo.lat, lon:geo.lon, temp, wind, humid, pressure, sea, uv:null });
-  }catch(e){ res.status(500).json({ error:"wx_failed" }); }
-});
-
-// -------- photos (Wikimedia)
-app.get("/photos", async (req,res)=>{
-  try{
-    const city = req.query.city || "Croatia";
-    const u = `https://commons.wikimedia.org/w/api.php?action=query&origin=*&format=json&prop=pageimages|images&generator=search&gsrsearch=${encodeURIComponent(city)}&gsrlimit=12&pithumbsize=640`;
-    const j = await (await fetch(u)).json();
-    const pages = Object.values(j.query?.pages || {});
-    const photos = pages.map(p=>p.thumbnail?.source).filter(Boolean);
-    res.json({ photos });
-  }catch(e){ res.status(500).json({ error:"photos_failed" }); }
-});
-
-// -------- POI (Wikipedia geosearch)
-app.get("/poi", async (req,res)=>{
-  try{
-    const city = req.query.city || "Split";
-    const geo = await geocodeCity(city);
-    if(!geo) return res.json({ items:[] });
-    const u = `https://hr.wikipedia.org/w/api.php?action=query&origin=*&list=geosearch&gscoord=${geo.lat}|${geo.lon}&gsradius=8000&gslimit=12&format=json`;
-    const j = await (await fetch(u)).json();
-    const items = (j.query?.geosearch||[]).map(p=>({
-      name:p.title, dist:p.dist, page:`https://hr.wikipedia.org/?curid=${p.pageid}`, category:"poi"
-    }));
-    res.json({ items });
-  }catch(e){ res.status(500).json({ error:"poi_failed" }); }
-});
-
-// -------- services & emergency
-app.get("/services", async (_req,res)=>{
-  res.json({ items:[
-    { name:"Policija 192", type:"emergency", href:"tel:192" },
-    { name:"Hitna 194", type:"emergency", href:"tel:194" },
-    { name:"Vatrogasci 193", type:"emergency", href:"tel:193" },
-    { name:"EU 112", type:"emergency", href:"tel:112" },
-    { name:"EV punionice", type:"ev", href:"https://www.plugshare.com/" },
-    { name:"Najbliža bolnica (Mape)", type:"health", href:"https://www.google.com/maps/search/hospital/" }
-  ]});
-});
-
-// -------- booking (demo list + redirect partners)
-app.get("/booking/search", async (req,res)=>{
-  const { city="Split" } = req.query;
-  const rnd = (a,b)=>Math.round(a + Math.random()*(b-a));
-  const mk = (i)=>({ id:i, name:`${city} Apartment #${100+i}`, price:rnd(45,180), address:`${city} centar`, rating:(Math.random()*2+3).toFixed(1) });
-  res.json({ results: [mk(1),mk(2),mk(3),mk(4),mk(5),mk(6)] });
-});
-app.post("/booking/reserve", async (req,res)=> res.json({ ok:true, id:req.body?.id||null }));
-
-// -------- assistant (heuristika bez ključa)
-app.post("/assistant/query", async (req,res)=>{
-  const q = (req.body?.query||"").toLowerCase();
-  if(/(ruta|vozi|put|do|za)/.test(q)){
-    const m = q.match(/(?:do|za)\s+(.+)$/); return res.json({ intent:"route", to:m?m[1]:"" });
-  }
-  if(/(rezerv|apartman|hotel|smješta)/.test(q)){
-    const m = q.match(/(?:u|za)\s+([A-Za-zčćžšđ\s]+)/); return res.json({ intent:"book", city:m?m[1].trim():"" });
-  }
-  res.json({ intent:"none" });
-});
-
-// -------- assistant LLM (Gemini prefer, OpenAI fallback)
-app.post("/assistant/llm", async (req,res)=>{
-  try{
-    const { text, lang="hr" } = req.body||{};
-    const GEM = process.env.GOOGLE_AI_KEY;
-    const OAI = process.env.OPENAI_API_KEY;
-
-    if(GEM){
-      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key="+GEM,{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          contents:[{parts:[{text: `Odgovori koncizno na jeziku: ${lang}. Pitanje: ${text}` }]}]
-        })
+// --------- ALERTS / TICKER (promet + radari + požari + trgovine) ----------
+app.get("/api/alerts", async (req, res) => {
+  const city = (req.query.city || "Zagreb").trim();
+  const items = [
+    `TBW LIVE • ${city}`,
+    `Promet: uglavnom uredan`,
+    `Nema posebnih vremenskih upozorenja za ${city}`
+  ];
+  // ako ima TomTom key, probaj dohvatiti 1-2 incidenta u krugu ~30km oko ZG
+  if (HAS.tt) {
+    const lat = req.query.lat || "45.813";
+    const lon = req.query.lon || "15.977";
+    const u = `https://api.tomtom.com/traffic/services/5/incidentDetails?lat=${lat}&lon=${lon}&radius=30000&key=${TOMTOM_API_KEY}`;
+    const t = await safeGet(u);
+    if (t.ok && Array.isArray(t.data?.incidents)) {
+      t.data.incidents.slice(0, 2).forEach(i => {
+        const desc = i?.properties?.description || "Prometni događaj";
+        items.push(`🚧 ${desc}`);
       });
-      const j = await r.json();
-      const out = j?.candidates?.[0]?.content?.parts?.[0]?.text || "Nema odgovora.";
-      return res.json({ text: out, lang });
-    }else if(OAI){
-      const r = await fetch("https://api.openai.com/v1/chat/completions",{
-        method:"POST",
-        headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${OAI}`},
-        body: JSON.stringify({
-          model:"gpt-4o-mini",
-          messages:[{role:"user", content:`Odgovori koncizno na jeziku: ${lang}. Pitanje: ${text}`}],
-          temperature:0.6
-        })
-      });
-      const j = await r.json();
-      const out = j?.choices?.[0]?.message?.content?.trim() || "Nema odgovora.";
-      return res.json({ text: out, lang });
-    }else{
-      return res.json({ text:"AI ključ nije postavljen na backendu.", lang });
     }
-  }catch(e){
-    res.status(500).json({ error:"llm_failed" });
+  } else {
+    items.push("🛣️ Obilaznica djelomično opterećena");
+  }
+  // demo trgovine
+  items.push("🛒 Lidl i Kaufland otvoreni • Konzum zatvara u 21:00");
+  res.json({ ok: true, city, items });
+});
+
+// --------- SHOPS / OPEN NOW (Google Places) ----------
+app.get("/api/shops", async (req, res) => {
+  const q = req.query.q || "grocery";
+  const city = req.query.city || "Zagreb";
+  if (!HAS.gp) {
+    return res.json({
+      ok: true,
+      openNow: [
+        { name: "Lidl", closes: "22:00" },
+        { name: "Kaufland", closes: "22:00" }
+      ]
+    });
+  }
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
+    `${q} in ${city}`
+  )}&key=${GOOGLE_PLACES_API_KEY}`;
+  const r = await safeGet(url);
+  if (!r.ok) return res.json({ ok: false, error: "Google Places fail" });
+  const openNow = (r.data.results || [])
+    .slice(0, 6)
+    .map(s => ({
+      name: s.name,
+      closes: s.opening_hours?.open_now ? "otvoreno" : "zatvoreno",
+      address: s.formatted_address,
+      rating: s.rating
+    }));
+  res.json({ ok: true, openNow });
+});
+
+// --------- TRAFFIC INCIDENTS (TomTom) ----------
+app.get("/api/traffic/events", async (req, res) => {
+  if (!HAS.tt) {
+    return res.json({
+      ok: true,
+      items: [
+        { msg: "Pojačan promet prema centru" },
+        { msg: "Zastoj kod ulaza na obilaznicu" }
+      ]
+    });
+  }
+  const lat = req.query.lat || "45.813";
+  const lon = req.query.lon || "15.977";
+  const url = `https://api.tomtom.com/traffic/services/5/incidentDetails?lat=${lat}&lon=${lon}&radius=30000&key=${TOMTOM_API_KEY}`;
+  const r = await safeGet(url);
+  if (!r.ok) return res.json({ ok: false, items: [] });
+  const items = (r.data.incidents || []).slice(0, 8).map(i => ({
+    msg: i?.properties?.description || "Prometni događaj"
+  }));
+  res.json({ ok: true, items });
+});
+
+// --------- VRIJEME (OpenWeather) ----------
+app.get("/api/weather", async (req, res) => {
+  const city = req.query.city || "Zagreb";
+  if (!HAS.ow) {
+    return res.json({
+      ok: true,
+      city,
+      temp: 12,
+      humidity: 68,
+      wind: 4,
+      air: "Dobar",
+      icon: "01d"
+    });
+  }
+  const u = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
+    city
+  )}&units=metric&appid=${OPENWEATHER_API_KEY}`;
+  const r = await safeGet(u);
+  if (!r.ok) return res.json({ ok: false, error: "OW fail" });
+  const d = r.data;
+  res.json({
+    ok: true,
+    city,
+    temp: d?.main?.temp,
+    humidity: d?.main?.humidity,
+    wind: d?.wind?.speed,
+    air: "Dostupno s AQI API (kasnije)",
+    icon: d?.weather?.[0]?.icon
+  });
+});
+
+// --------- STANJE MORA (demo + hook za real API) ----------
+app.get("/api/sea", async (req, res) => {
+  // Ovdje možeš spojiti se na stvarni izvor (Copernicus/NOAA/Meteo)
+  res.json({
+    ok: true,
+    temp: 18.2,
+    waves: "0.5 m",
+    wind: "7 kt",
+    photos: [
+      "https://images.pexels.com/photos/460376/pexels-photo-460376.jpeg",
+      "https://images.pexels.com/photos/417074/pexels-photo-417074.jpeg",
+      "https://images.pexels.com/photos/36717/makarska-riviera-croatia-vacation-sea.jpg",
+      "https://images.pexels.com/photos/248797/pexels-photo-248797.jpeg",
+      "https://images.pexels.com/photos/533923/pexels-photo-533923.jpeg",
+      "https://images.pexels.com/photos/462162/pexels-photo-462162.jpeg"
+    ]
+  });
+});
+
+// --------- BOOKING “meta” (otvaranje partnera – mock potvrda) ----------
+app.post("/api/book", (req, res) => {
+  res.json({
+    ok: true,
+    message: "TBW: rezervacija proslijeđena partnerskim servisima (Booking/Expedia/Airbnb)."
+  });
+});
+
+// --------- AI CONCIERGE (OpenAI) ----------
+app.post("/api/ai", async (req, res) => {
+  const text = req.body?.message || "Pozdrav!";
+  if (!HAS.oa) {
+    return res.json({ ok: true, reply: "AI je spreman. Spoji OPENAI_API_KEY za pune odgovore." });
+  }
+  try {
+    const r = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "Ti si TBW AI Concierge. Odgovaraj kratko, jasno i korisno na hrvatskom." },
+          { role: "user", content: text }
+        ],
+        temperature: 0.7
+      },
+      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
+    );
+    const msg = r.data?.choices?.[0]?.message?.content?.trim() || "Nema odgovora.";
+    res.json({ ok: true, reply: msg });
+  } catch (e) {
+    res.json({ ok: false, reply: "AI trenutno nije dostupan." });
   }
 });
 
-app.listen(PORT, ()=> console.log(`✅ TBW backend listening on :${PORT}`));
+// --------- 404 ----------
+app.use((req, res) => res.status(404).json({ ok: false, error: "Not found" }));
+
+// --------- EXPORT / LISTEN ----------
+// Vercel serverless: export default app
+const isVercel = !!process.env.VERCEL;
+if (isVercel) {
+  export default app;
+} else {
+  app.listen(PORT, () => console.log(`TBW Backend ✅ listening on :${PORT}`));
+}
