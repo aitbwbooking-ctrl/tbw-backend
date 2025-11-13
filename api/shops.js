@@ -1,5 +1,4 @@
 export default function handler(req, res) {
-  // Demo odgovor – kasnije ćemo spojiti na prave izvore
   res.status(200).json({
     city: "Split",
     opened: [
