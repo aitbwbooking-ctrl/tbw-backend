@@ -1,85 +1,78 @@
-export default async function handler(req, res) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+export default function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    if (req.method === "OPTIONS") {
-        return res.status(200).end();
-    }
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
-    const route = req.query.route;
-    const city = req.query.city || "Split";
+  const route = req.query.route;
+  const city = req.query.city || "Split";
 
-    function send(data) {
-        return res.status(200).json({ ok: true, ...data });
-    }
+  function send(data) {
+    return res.status(200).json({ ok: true, city, ...data });
+  }
 
-    switch (route) {
+  switch (route) {
 
-        case "weather":
-            return send({
-                city,
-                temperature: 15,
-                condition: "scattered clouds"
-            });
+    case "weather":
+      return send({
+        temperature: 15,
+        condition: "scattered clouds"
+      });
 
-        case "traffic":
-            return send({
-                traffic_status: "moderate",
-                speed: "55 km/h",
-                delay: "3 min"
-            });
+    case "traffic":
+      return send({
+        status: "moderate",
+        speed: "55 km/h",
+        delay_min: 3,
+        note: "Prometna nesreća – A1 kod Dugopolja, usporeno."
+      });
 
-        case "services":
-            return send({
-                items: [
-                    { name: "Konzum", status: "open", closes: "22:00" },
-                    { name: "Tommy", status: "open", closes: "21:00" }
-                ]
-            });
+    case "sea":
+      return send({
+        temperature: 18,
+        note: "More oko 18°C, UV umjeren."
+      });
 
-        case "transit":
-            return send({
-                buses: [
-                    { line: 37, from: "Split", to: "Trogir", next: "12:22" }
-                ]
-            });
+    case "services":
+      return send({
+        items: [
+          { name: "Konzum", status: "open", closes: "22:00" },
+          { name: "Tommy", status: "open", closes: "21:00" }
+        ]
+      });
 
-        // ⭐ NOVO – STANJE MORA (popravlja sve tvoje greške)
-        case "sea":
-            return send({
-                sea: {
-                    temperature: "13°C",
-                    uv: "umjeren",
-                    message: "More oko 13°C. UV umjeren."
-                }
-            });
+    case "transit":
+      return send({
+        items: [
+          { type: "Bus", line: "37", from: "Split", to: "Trogir", next: "12:22" }
+        ]
+      });
 
-        case "airport":
-            return send({
-                flights: [
-                    {
-                        flight_no: "LH1412",
-                        from: "Frankfurt",
-                        to: "Zagreb",
-                        status: "on time",
-                        eta: "15:42"
-                    }
-                ],
-                rds: [
-                    { message: "Požar u blizini Dugopolja – oprez!" }
-                ]
-            });
+    case "airport":
+      return send({
+        items: [
+          {
+            flight: "LH1412",
+            from: "Frankfurt",
+            to: "Zagreb",
+            status: "on time",
+            eta: "15:42"
+          }
+        ]
+      });
 
-        case "alerts":
-            return send({
-                alerts: [
-                    "Prometna nesreća – A1 kod Dugopolja",
-                    "Jako jugo – očekuje se nevera"
-                ]
-            });
+    case "alerts":
+      return send({
+        alerts: [
+          { message: "Prometna nesreća – A1 kod Dugopolja, usporeno" },
+          { message: "Jako jugo – očekuje se neverin" }
+        ]
+      });
 
-        default:
-            return res.status(404).json({ ok: false, error: "Unknown route" });
-    }
+    default:
+      return res.status(404).json({ ok: false, error: "Unknown route" });
+  }
 }
